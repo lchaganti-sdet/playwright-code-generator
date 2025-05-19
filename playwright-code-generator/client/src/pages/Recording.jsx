@@ -110,7 +110,7 @@ const Recording = () => {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to stop recording');
+        throw new Error(data.error || data.details || 'Failed to stop recording');
       }
 
       if (data.steps) {
@@ -140,6 +140,7 @@ const Recording = () => {
       console.error('Stop recording error:', error);
       setError(error.message || 'Failed to stop recording');
       setIsRecording(false);
+      setSessionId(null);
     } finally {
       setLoading(false);
     }

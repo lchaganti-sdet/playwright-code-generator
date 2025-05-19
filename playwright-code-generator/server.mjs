@@ -3,7 +3,7 @@ import cors from 'cors';
 import { chromium } from '@playwright/test';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import fs from 'fs/promises';
+import { promises as fs } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -622,11 +622,12 @@ app.post('/api/recording/stop', async (req, res) => {
     const testFilePath = join(__dirname, 'tests', testFileName);
     
     // Ensure tests directory exists
-    if (!fs.existsSync(join(__dirname, 'tests'))) {
+    try {
       await fs.mkdir(join(__dirname, 'tests'), { recursive: true });
+      await fs.writeFile(testFilePath, testCode);
+    } catch (error) {
+      console.warn('Failed to save test file:', error);
     }
-    
-    await fs.writeFile(testFilePath, testCode);
 
     // Save the recorded scenario
     let domain = 'default';
