@@ -195,33 +195,33 @@ const generateTestCode = (steps, scenarioName) => {
   const stepsCode = steps.map(step => {
     switch (step.type) {
       case 'click':
-        return `  // Click on element
+        return `  // ${step.description}
   await page.click('${step.selector}');
   await page.waitForLoadState('networkidle');`;
       case 'fill':
-        return `  // Fill input field
+        return `  // ${step.description}
   await page.fill('${step.selector}', '${step.value}');`;
       case 'select':
-        return `  // Select option
+        return `  // ${step.description}
   await page.selectOption('${step.selector}', '${step.value}');`;
       case 'check':
-        return `  // Check checkbox
+        return `  // ${step.description}
   await page.check('${step.selector}');`;
       case 'uncheck':
-        return `  // Uncheck checkbox
+        return `  // ${step.description}
   await page.uncheck('${step.selector}');`;
       case 'navigate':
-        return `  // Navigate to URL
+        return `  // ${step.description}
   await page.goto('${step.url}');
   await page.waitForLoadState('networkidle');`;
       case 'login':
-        return `  // Login with credentials
+        return `  // ${step.description}
   await page.fill('${step.testData.selector}', '${step.testData.username}');
   await page.fill('#password', '${step.testData.password}');
   await page.click('[data-test="login-button"]');
   await page.waitForLoadState('networkidle');`;
       case 'action':
-        return `  // Perform action
+        return `  // ${step.description}
   await page.click('${step.testData.selector}');
   await page.waitForLoadState('networkidle');`;
       default:
@@ -282,19 +282,21 @@ app.post('/api/recording/start', async (req, res) => {
     const steps = [];
 
     // Set up event listeners for recording
-    await page.exposeFunction('recordClick', async (selector) => {
+    await page.exposeFunction('recordClick', async (selector, text) => {
       steps.push({
         type: 'click',
         selector,
+        description: `Click on ${text || selector}`,
         timestamp: Date.now()
       });
     });
 
-    await page.exposeFunction('recordInput', async (selector, value) => {
+    await page.exposeFunction('recordInput', async (selector, value, text) => {
       steps.push({
         type: 'fill',
         selector,
         value,
+        description: `Fill ${text || selector} with ${value}`,
         timestamp: Date.now()
       });
     });
@@ -303,17 +305,20 @@ app.post('/api/recording/start', async (req, res) => {
     await page.evaluate(() => {
       document.addEventListener('click', (e) => {
         const selector = getSelector(e.target);
-        window.recordClick(selector);
+        const text = e.target.textContent?.trim() || '';
+        window.recordClick(selector, text);
       });
 
       document.addEventListener('input', (e) => {
         const selector = getSelector(e.target);
-        window.recordInput(selector, e.target.value);
+        const text = e.target.placeholder || e.target.name || '';
+        window.recordInput(selector, e.target.value, text);
       });
 
       function getSelector(element) {
         if (element.id) return `#${element.id}`;
         if (element.name) return `[name="${element.name}"]`;
+        if (element.getAttribute('data-test')) return `[data-test="${element.getAttribute('data-test')}"]`;
         if (element.className) return `.${element.className.split(' ').join('.')}`;
         return element.tagName.toLowerCase();
       }
@@ -361,55 +366,97 @@ app.post('/api/recording/start', async (req, res) => {
 });
 
 // API endpoint to stop recording
-app.post('/api/stop-recording', async (req, res) => {
-  const { sessionId } = req.body;
-  
-  if (!sessionId) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Session ID is required'
-    });
-  }
-
-  const session = recordingSessions.get(sessionId);
-  if (!session) {
-    return res.status(404).json({
-      status: 'error',
-      message: 'Recording session not found'
-    });
-  }
-
+app.post('/api/recording/stop', async (req, res) => {
   try {
-    session.isRecording = false;
+    const { sessionId, scenarioName, url } = req.body;
     
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    const session = recordingSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Recording session not found' });
+    }
+
+    const { browser, context, page, steps } = session;
+    
+    // Generate test code with proper steps
+    const testCode = `import { test, expect } from '@playwright/test';
+
+test('${scenarioName || session.scenarioName}', async ({ page }) => {
+  // Navigate to the application
+  await page.goto('${session.url}');
+  await page.waitForLoadState('networkidle');
+
+${steps.map(step => {
+  switch (step.type) {
+    case 'click':
+      return `  // ${step.description}
+  await page.click('${step.selector}');
+  await page.waitForLoadState('networkidle');`;
+    case 'fill':
+      return `  // ${step.description}
+  await page.fill('${step.selector}', '${step.value}');`;
+    default:
+      return `  // ${step.description}`;
+  }
+}).join('\n\n')}
+});`;
+    
+    // Save test code to file
+    const testFileName = `${scenarioName || session.scenarioName}.spec.js`;
+    const testFilePath = join(__dirname, 'tests', testFileName);
+    
+    // Ensure tests directory exists
+    try {
+      await fs.mkdir(join(__dirname, 'tests'), { recursive: true });
+      await fs.writeFile(testFilePath, testCode);
+    } catch (error) {
+      console.warn('Failed to save test file:', error);
+    }
+
     // Save the recorded scenario
-    const domain = session.url.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+    let domain = 'default';
+    try {
+      if (url) {
+        const formattedUrl = url.startsWith('http') ? url : `https://${url}`;
+        domain = new URL(formattedUrl).hostname.replace(/^www\./, '');
+      }
+    } catch (error) {
+      console.warn('Failed to parse URL, using default domain:', error);
+    }
+
     const scenarios = recordedScenarios.get(domain) || [];
     scenarios.push({
-      name: session.scenarioName,
-      steps: session.steps
+      name: scenarioName || session.scenarioName,
+      steps: steps
     });
     recordedScenarios.set(domain, scenarios);
 
     // Clean up
-    await session.page.close();
-    await session.context.close();
-    await session.browser.close();
+    try {
+      await page.close();
+      await context.close();
+      await browser.close();
+    } catch (error) {
+      console.warn('Error during cleanup:', error);
+    }
+    
     recordingSessions.delete(sessionId);
 
     res.json({
-      status: 'success',
-      message: 'Recording stopped',
-      scenario: {
-        name: session.scenarioName,
-        steps: session.steps
-      }
+      success: true,
+      message: 'Recording stopped and test code generated',
+      steps,
+      testCode,
+      testFilePath
     });
   } catch (error) {
     console.error('Failed to stop recording:', error);
-    res.status(500).json({
-      status: 'error',
-      message: error.message
+    res.status(500).json({ 
+      error: 'Failed to stop recording',
+      details: error.message 
     });
   }
 });
@@ -596,82 +643,6 @@ app.get('/api/recording/status/:sessionId', (req, res) => {
     return res.status(404).json({ error: 'Recording session not found' });
   }
   res.json({ steps: recording.steps });
-});
-
-// Stop recording
-app.post('/api/recording/stop', async (req, res) => {
-  try {
-    const { sessionId, scenarioName, url } = req.body;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-
-    const session = recordingSessions.get(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: 'Recording session not found' });
-    }
-
-    const { browser, context, page, steps } = session;
-    
-    // Generate test code
-    const testCode = generateTestCode(steps, scenarioName || session.scenarioName);
-    
-    // Save test code to file
-    const testFileName = `${scenarioName || session.scenarioName}.spec.js`;
-    const testFilePath = join(__dirname, 'tests', testFileName);
-    
-    // Ensure tests directory exists
-    try {
-      await fs.mkdir(join(__dirname, 'tests'), { recursive: true });
-      await fs.writeFile(testFilePath, testCode);
-    } catch (error) {
-      console.warn('Failed to save test file:', error);
-    }
-
-    // Save the recorded scenario
-    let domain = 'default';
-    try {
-      if (url) {
-        const formattedUrl = url.startsWith('http') ? url : `https://${url}`;
-        domain = new URL(formattedUrl).hostname.replace(/^www\./, '');
-      }
-    } catch (error) {
-      console.warn('Failed to parse URL, using default domain:', error);
-    }
-
-    const scenarios = recordedScenarios.get(domain) || [];
-    scenarios.push({
-      name: scenarioName || session.scenarioName,
-      steps: steps
-    });
-    recordedScenarios.set(domain, scenarios);
-
-    // Clean up
-    try {
-      await page.close();
-      await context.close();
-      await browser.close();
-    } catch (error) {
-      console.warn('Error during cleanup:', error);
-    }
-    
-    recordingSessions.delete(sessionId);
-
-    res.json({
-      success: true,
-      message: 'Recording stopped and test code generated',
-      steps,
-      testCode,
-      testFilePath
-    });
-  } catch (error) {
-    console.error('Failed to stop recording:', error);
-    res.status(500).json({ 
-      error: 'Failed to stop recording',
-      details: error.message 
-    });
-  }
 });
 
 // Get scenarios
