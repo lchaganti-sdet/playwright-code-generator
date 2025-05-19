@@ -1,6 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import { chromium } from '@playwright/test';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import fs from 'fs/promises';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -182,132 +188,174 @@ function getTestScenarios(url) {
   return testScenarios[domain] || [];
 }
 
-// API endpoint to start recording
-app.post('/api/start-recording', async (req, res) => {
-  const { url, scenarioName } = req.body;
-  
-  if (!url || !scenarioName) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'URL and scenario name are required'
-    });
-  }
+// Helper function to generate test code
+const generateTestCode = (steps, scenarioName) => {
+  const imports = `import { test, expect } from '@playwright/test';\n\n`;
+  const testFunction = `test('${scenarioName}', async ({ page }) => {\n`;
+  const stepsCode = steps.map(step => {
+    switch (step.type) {
+      case 'click':
+        return `  // Click on element
+  await page.click('${step.selector}');
+  await page.waitForLoadState('networkidle');`;
+      case 'fill':
+        return `  // Fill input field
+  await page.fill('${step.selector}', '${step.value}');`;
+      case 'select':
+        return `  // Select option
+  await page.selectOption('${step.selector}', '${step.value}');`;
+      case 'check':
+        return `  // Check checkbox
+  await page.check('${step.selector}');`;
+      case 'uncheck':
+        return `  // Uncheck checkbox
+  await page.uncheck('${step.selector}');`;
+      case 'navigate':
+        return `  // Navigate to URL
+  await page.goto('${step.url}');
+  await page.waitForLoadState('networkidle');`;
+      case 'login':
+        return `  // Login with credentials
+  await page.fill('${step.testData.selector}', '${step.testData.username}');
+  await page.fill('#password', '${step.testData.password}');
+  await page.click('[data-test="login-button"]');
+  await page.waitForLoadState('networkidle');`;
+      case 'action':
+        return `  // Perform action
+  await page.click('${step.testData.selector}');
+  await page.waitForLoadState('networkidle');`;
+      default:
+        return `  // ${step.description}`;
+    }
+  }).join('\n\n');
+  return `${imports}${testFunction}${stepsCode}\n});\n`;
+};
 
+// Helper function to validate URL
+function validateUrl(url) {
   try {
+    // Add https:// if no protocol is specified
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://' + url;
+    }
+    const parsedUrl = new URL(url);
+    return parsedUrl.toString();
+  } catch (error) {
+    throw new Error('Invalid URL format. Please provide a valid URL (e.g., https://gmail.com)');
+  }
+}
+
+// API endpoint to start recording
+app.post('/api/recording/start', async (req, res) => {
+  try {
+    const { url, scenarioName } = req.body;
+    
+    if (!url || !scenarioName) {
+      return res.status(400).json({ error: 'URL and scenario name are required' });
+    }
+
+    // Ensure URL has proper format
+    let formattedUrl = url;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      formattedUrl = `https://${url}`;
+    }
+
+    // Validate URL format
+    try {
+      new URL(formattedUrl);
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    const sessionId = Date.now().toString();
     const browser = await chromium.launch({ 
       headless: false,
-      args: [
-        '--start-maximized',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--window-size=1920,1080'
-      ]
+      slowMo: 50
     });
-
+    
     const context = await browser.newContext({
-      viewport: { width: 1920, height: 1080 },
+      viewport: { width: 1280, height: 720 },
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     });
 
     const page = await context.newPage();
-    
-    // Start recording
     const steps = [];
-    let isRecording = true;
 
-    // Listen for navigation events
-    page.on('load', () => {
-      if (isRecording) {
-        steps.push({
-          description: `Navigate to ${page.url()}`,
-          type: 'navigation',
-          testData: {
-            url: page.url()
-          }
-        });
+    // Set up event listeners for recording
+    await page.exposeFunction('recordClick', async (selector) => {
+      steps.push({
+        type: 'click',
+        selector,
+        timestamp: Date.now()
+      });
+    });
+
+    await page.exposeFunction('recordInput', async (selector, value) => {
+      steps.push({
+        type: 'fill',
+        selector,
+        value,
+        timestamp: Date.now()
+      });
+    });
+
+    // Add event listeners
+    await page.evaluate(() => {
+      document.addEventListener('click', (e) => {
+        const selector = getSelector(e.target);
+        window.recordClick(selector);
+      });
+
+      document.addEventListener('input', (e) => {
+        const selector = getSelector(e.target);
+        window.recordInput(selector, e.target.value);
+      });
+
+      function getSelector(element) {
+        if (element.id) return `#${element.id}`;
+        if (element.name) return `[name="${element.name}"]`;
+        if (element.className) return `.${element.className.split(' ').join('.')}`;
+        return element.tagName.toLowerCase();
       }
     });
 
-    // Listen for click events
-    page.on('click', async (event) => {
-      if (isRecording) {
-        const element = event.target;
-        const selector = await page.evaluate(el => {
-          // Generate a unique selector for the element
-          if (el.id) return `#${el.id}`;
-          if (el.className) return `.${el.className.split(' ')[0]}`;
-          return el.tagName.toLowerCase();
-        }, element);
-
-        steps.push({
-          description: `Click on ${selector}`,
-          type: 'action',
-          testData: {
-            selector,
-            action: 'click'
-          }
-        });
+    // Navigate to the URL with retry logic
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount < maxRetries) {
+      try {
+        console.log(`Navigating to ${formattedUrl} (attempt ${retryCount + 1})`);
+        await page.goto(formattedUrl, { waitUntil: 'networkidle' });
+        break;
+      } catch (error) {
+        retryCount++;
+        if (retryCount === maxRetries) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
-    });
+    }
 
-    // Listen for form submissions
-    page.on('submit', async (event) => {
-      if (isRecording) {
-        const form = event.target;
-        const formData = await page.evaluate(form => {
-          const data = {};
-          for (const element of form.elements) {
-            if (element.name) {
-              data[element.name] = element.value;
-            }
-          }
-          return data;
-        }, form);
-
-        steps.push({
-          description: `Submit form with data: ${JSON.stringify(formData)}`,
-          type: 'action',
-          testData: {
-            selector: await page.evaluate(form => {
-              if (form.id) return `#${form.id}`;
-              if (form.className) return `.${form.className.split(' ')[0]}`;
-              return 'form';
-            }, form),
-            action: 'submit',
-            formData
-          }
-        });
-      }
-    });
-
-    // Navigate to the URL
-    await page.goto(url);
-
-    // Store recording session
-    const sessionId = Date.now().toString();
     recordingSessions.set(sessionId, {
       browser,
       context,
       page,
       steps,
-      isRecording,
-      url,
-      scenarioName
+      scenarioName,
+      url: formattedUrl
     });
 
-    res.json({
-      status: 'success',
-      sessionId,
-      message: 'Recording started'
+    res.json({ 
+      success: true, 
+      message: 'Recording started successfully',
+      sessionId 
     });
   } catch (error) {
     console.error('Failed to start recording:', error);
-    res.status(500).json({
-      status: 'error',
-      message: error.message
+    res.status(500).json({ 
+      error: 'Failed to start recording',
+      details: error.message 
     });
   }
 });
@@ -540,90 +588,148 @@ app.get('/api/scenarios', (req, res) => {
   res.json(scenarios);
 });
 
-// Start recording session
-app.post('/api/recording/start', async (req, res) => {
-  try {
-    const { url } = req.body;
-    const browser = await chromium.launch({ headless: false });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    
-    // Start recording
-    await page.goto(url);
-    
-    const sessionId = Date.now().toString();
-    recordingSessions.set(sessionId, { browser, context, page });
-    
-    res.json({ sessionId });
-  } catch (error) {
-    console.error('Failed to start recording:', error);
-    res.status(500).json({ error: error.message });
+// Get recording status
+app.get('/api/recording/status/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const recording = recordingSessions.get(sessionId);
+  if (!recording) {
+    return res.status(404).json({ error: 'Recording session not found' });
   }
+  res.json({ steps: recording.steps });
 });
 
-// Stop recording session and get recorded steps
+// Stop recording
 app.post('/api/recording/stop', async (req, res) => {
   try {
-    const { sessionId } = req.body;
-    const session = recordingSessions.get(sessionId);
+    const { sessionId, scenarioName, url } = req.body;
     
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    const session = recordingSessions.get(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Recording session not found' });
     }
+
+    const { browser, context, page, steps } = session;
     
-    const { browser, context, page } = session;
+    // Generate test code
+    const testCode = generateTestCode(steps, scenarioName || session.scenarioName);
     
-    // Get recorded steps from the page
-    const recordedSteps = await page.evaluate(() => {
-      return window.__playwright_recording_steps || [];
+    // Save test code to file
+    const testFileName = `${scenarioName || session.scenarioName}.spec.js`;
+    const testFilePath = join(__dirname, 'tests', testFileName);
+    
+    // Ensure tests directory exists
+    if (!fs.existsSync(join(__dirname, 'tests'))) {
+      await fs.mkdir(join(__dirname, 'tests'), { recursive: true });
+    }
+    
+    await fs.writeFile(testFilePath, testCode);
+
+    // Save the recorded scenario
+    let domain = 'default';
+    try {
+      if (url) {
+        const formattedUrl = url.startsWith('http') ? url : `https://${url}`;
+        domain = new URL(formattedUrl).hostname.replace(/^www\./, '');
+      }
+    } catch (error) {
+      console.warn('Failed to parse URL, using default domain:', error);
+    }
+
+    const scenarios = recordedScenarios.get(domain) || [];
+    scenarios.push({
+      name: scenarioName || session.scenarioName,
+      steps: steps
     });
-    
+    recordedScenarios.set(domain, scenarios);
+
     // Clean up
-    await context.close();
-    await browser.close();
-    recordingSessions.delete(sessionId);
+    try {
+      await page.close();
+      await context.close();
+      await browser.close();
+    } catch (error) {
+      console.warn('Error during cleanup:', error);
+    }
     
-    res.json({ steps: recordedSteps });
+    recordingSessions.delete(sessionId);
+
+    res.json({
+      success: true,
+      message: 'Recording stopped and test code generated',
+      steps,
+      testCode,
+      testFilePath
+    });
   } catch (error) {
     console.error('Failed to stop recording:', error);
+    res.status(500).json({ 
+      error: 'Failed to stop recording',
+      details: error.message 
+    });
+  }
+});
+
+// Get scenarios
+app.get('/api/scenarios', async (req, res) => {
+  try {
+    const { url } = req.query;
+    const testDir = join(__dirname, 'tests');
+    const files = await fs.readdir(testDir);
+    const scenarios = files
+      .filter(file => file.endsWith('.spec.ts'))
+      .map(file => ({
+        name: file.replace('.spec.ts', ''),
+        url,
+      }));
+    res.json(scenarios);
+  } catch (error) {
+    console.error('Failed to fetch scenarios:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Execute scenario
-app.post('/api/scenarios/execute', async (req, res) => {
+// Run tests
+app.post('/api/run-tests', async (req, res) => {
   try {
-    const { url, scenario, headed } = req.body;
-    const browser = await chromium.launch({ headless: !headed });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    
+    const { url, selectedScenarios, headed = false } = req.body;
     const results = [];
-    
-    try {
-      await page.goto(url);
+
+    for (const scenarioName of selectedScenarios) {
+      const testFile = join(__dirname, 'tests', `${scenarioName}.spec.ts`);
+      const testCode = await fs.readFile(testFile, 'utf-8');
       
-      for (const step of scenario.steps) {
-        const result = await executeStep(page, step);
+      // Execute test using Playwright
+      const browser = await chromium.launch({ headless: !headed });
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      
+      try {
+        // Execute test code
+        const testFunction = new Function('page', testCode);
+        await testFunction(page);
         results.push({
-          step: step.description,
-          ...result
+          scenario: scenarioName,
+          status: 'passed',
+          steps: [{ testName: scenarioName, status: 'passed' }],
         });
+      } catch (error) {
+        results.push({
+          scenario: scenarioName,
+          status: 'failed',
+          steps: [{ testName: scenarioName, status: 'failed', error: error.message }],
+        });
+      } finally {
+        await browser.close();
       }
-      
-      res.json({ success: true, results });
-    } catch (error) {
-      res.json({ 
-        success: false, 
-        error: error.message,
-        results 
-      });
-    } finally {
-      await context.close();
-      await browser.close();
     }
+
+    res.json({ results });
   } catch (error) {
-    console.error('Failed to execute scenario:', error);
+    console.error('Failed to run tests:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -653,51 +759,82 @@ app.get('/api/testdata/database', (req, res) => {
   });
 });
 
-// Update the executeStep function
-async function executeStep(page, step) {
-  console.log(`Executing step: ${step.description}`);
-  
+// API endpoint to generate API automation code
+app.post('/api/generate-api-code', (req, res) => {
   try {
-    switch (step.type) {
-      case 'login':
-        console.log('Filling login form...');
-        await page.waitForSelector('#user-name', { timeout: 30000 });
-        await page.fill('#user-name', step.testData.username);
-        await page.fill('#password', step.testData.password);
-        await page.click('[data-test="login-button"]');
-        console.log('Waiting for expected text...');
-        await page.waitForSelector(`text=${step.testData.expectedText}`, { timeout: 30000 });
-        break;
-        
-      case 'action':
-        console.log('Performing action...');
-        await page.waitForSelector(step.testData.selector, { timeout: 30000 });
-        await page.click(step.testData.selector);
-        if (step.testData.expectedText) {
-          await page.waitForSelector(`text=${step.testData.expectedText}`, { timeout: 30000 });
-        }
-        break;
-        
-      case 'navigation':
-        console.log('Performing navigation action...');
-        await page.waitForSelector(step.testData.selector, { timeout: 30000 });
-        await page.click(step.testData.selector);
-        if (step.testData.expectedText) {
-          await page.waitForSelector(`text=${step.testData.expectedText}`, { timeout: 30000 });
-        }
-        break;
-    }
+    const { endpoint, method, requestBody, responseSchema } = req.body;
     
-    return { success: true };
+    const code = `import { test, expect } from '@playwright/test';
+
+test('API Test: ${method.toUpperCase()} ${endpoint}', async ({ request }) => {
+  // Make the API request
+  const response = await request.${method.toLowerCase()}('${endpoint}'${
+      requestBody ? `, {
+    data: ${JSON.stringify(requestBody, null, 2)}
+  }` : ''
+    });
+
+  // Verify response status
+  expect(response.ok()).toBeTruthy();
+
+  // Parse response body
+  const data = await response.json();
+
+  // Verify response schema
+  ${responseSchema ? Object.entries(responseSchema)
+    .map(([key, type]) => `expect(typeof data.${key}).toBe('${type}');`)
+    .join('\n  ') : ''}
+
+  // Additional assertions can be added here
+});`;
+
+    res.json({ code });
   } catch (error) {
-    console.error(`Step failed: ${step.description}`, error);
-    return { 
-      success: false, 
-      error: error.message,
-      screenshot: await page.screenshot({ path: `error-${Date.now()}.png` })
-    };
+    console.error('Failed to generate API code:', error);
+    res.status(500).json({ error: error.message });
   }
-}
+});
+
+// API endpoint to generate UI test code
+app.post('/api/generate-code', (req, res) => {
+  try {
+    const { scenario, testData } = req.body;
+    
+    const code = `import { test, expect } from '@playwright/test';
+
+// Test Data
+const testData = ${JSON.stringify(testData, null, 2)};
+
+test('${scenario.name}', async ({ page }) => {
+  // Test Steps
+${scenario.steps.map(step => {
+  switch (step.type) {
+    case 'login':
+      return `  // ${step.description}
+  await page.fill('${step.testData.selector}', testData.username || '${step.testData.username}');
+  await page.fill('#password', testData.password || '${step.testData.password}');
+  await page.click('[data-test="login-button"]');
+  ${step.testData.expectedText ? `await expect(page.locator('text=${step.testData.expectedText}')).toBeVisible();` : ''}`;
+    case 'action':
+      return `  // ${step.description}
+  await page.click('${step.testData.selector}');
+  ${step.testData.expectedText ? `await expect(page.locator('text=${step.testData.expectedText}')).toBeVisible();` : ''}`;
+    case 'navigation':
+      return `  // ${step.description}
+  await page.click('${step.testData.selector}');
+  ${step.testData.expectedText ? `await expect(page.locator('text=${step.testData.expectedText}')).toBeVisible();` : ''}`;
+    default:
+      return `  // ${step.description}`;
+  }
+}).join('\n\n')}
+});`;
+
+    res.json({ code });
+  } catch (error) {
+    console.error('Failed to generate code:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {

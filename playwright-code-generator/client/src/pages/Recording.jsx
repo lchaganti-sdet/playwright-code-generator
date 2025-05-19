@@ -27,9 +27,13 @@ const Recording = () => {
 
   const startRecording = async () => {
     try {
-      setError(null);
+      if (!url || !scenarioName) {
+        setError('URL and scenario name are required');
+        return;
+      }
+
       setLoading(true);
-      setSteps([]);
+      setError(null);
       setGeneratedCode(null);
 
       const response = await fetch('http://localhost:3002/api/recording/start', {
@@ -37,30 +41,24 @@ const Recording = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          url,
-          scenarioName,
-          options: {
-            headless: false,
-            slowMo: 50
-          }
+        body: JSON.stringify({ 
+          url: url.startsWith('http') ? url : `https://${url}`,
+          scenarioName 
         }),
       });
 
       const data = await response.json();
-
       if (!response.ok) {
         throw new Error(data.error || 'Failed to start recording');
       }
 
       setSessionId(data.sessionId);
       setIsRecording(true);
-      setLoading(false);
-
-      // Start polling for steps
-      pollSteps(data.sessionId);
+      setError(null);
     } catch (error) {
       setError(error.message);
+      setIsRecording(false);
+    } finally {
       setLoading(false);
     }
   };
@@ -87,7 +85,17 @@ const Recording = () => {
 
   const stopRecording = async () => {
     try {
+      if (!sessionId) {
+        setError('No active recording session');
+        return;
+      }
+
       setLoading(true);
+      setError(null);
+
+      // Format URL properly
+      const formattedUrl = url.startsWith('http') ? url : `https://${url}`;
+
       const response = await fetch('http://localhost:3002/api/recording/stop', {
         method: 'POST',
         headers: {
@@ -95,29 +103,44 @@ const Recording = () => {
         },
         body: JSON.stringify({ 
           sessionId,
-          scenarioName 
+          scenarioName,
+          url: formattedUrl
         }),
       });
 
       const data = await response.json();
-
       if (!response.ok) {
         throw new Error(data.error || 'Failed to stop recording');
       }
 
-      setIsRecording(false);
-      setLoading(false);
-      setSessionId(null);
-      setGeneratedCode(data.testCode);
-
-      // Refresh the scenarios list in the TestExecution component
-      const scenariosResponse = await fetch(`http://localhost:3002/api/scenarios?url=${encodeURIComponent(url)}`);
-      if (scenariosResponse.ok) {
-        // The scenarios list will be updated when the user navigates to the TestExecution page
-        console.log('Test scenario saved successfully');
+      if (data.steps) {
+        setSteps(Array.isArray(data.steps) ? data.steps : []);
       }
+      
+      if (data.testCode) {
+        setGeneratedCode(data.testCode);
+      }
+
+      setIsRecording(false);
+      setSessionId(null);
+      setError(null);
+
+      // Refresh scenarios list
+      try {
+        const scenariosResponse = await fetch(`http://localhost:3002/api/scenarios?url=${encodeURIComponent(formattedUrl)}`);
+        if (!scenariosResponse.ok) {
+          console.warn('Failed to refresh scenarios list');
+        }
+      } catch (error) {
+        console.error('Failed to refresh scenarios:', error);
+      }
+
+      alert('Test code has been generated and saved. You can now execute it from the Test Execution page.');
     } catch (error) {
-      setError(error.message);
+      console.error('Stop recording error:', error);
+      setError(error.message || 'Failed to stop recording');
+      setIsRecording(false);
+    } finally {
       setLoading(false);
     }
   };
