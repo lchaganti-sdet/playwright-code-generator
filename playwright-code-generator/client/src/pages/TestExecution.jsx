@@ -13,9 +13,15 @@ import {
   Alert,
   TextField,
   Switch,
-  FormControlLabel
+  FormControlLabel,
+  CircularProgress,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText as MuiListItemText,
+  Divider
 } from '@mui/material';
-import { PlayArrow } from '@mui/icons-material';
+import { PlayArrow, CheckCircle, Error } from '@mui/icons-material';
 
 const TestExecution = () => {
   const [url, setUrl] = useState('');
@@ -23,25 +29,32 @@ const TestExecution = () => {
   const [selectedScenarios, setSelectedScenarios] = useState([]);
   const [results, setResults] = useState(null);
   const [headed, setHeaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchScenarios = async () => {
+    try {
+      const response = await fetch(`http://localhost:3002/api/scenarios?url=${encodeURIComponent(url)}`);
+      const data = await response.json();
+      setScenarios(data);
+    } catch (error) {
+      console.error('Failed to fetch scenarios:', error);
+      setError('Failed to fetch test scenarios');
+    }
+  };
 
   useEffect(() => {
     if (url) {
       fetchScenarios();
     }
-  }, [url, fetchScenarios]);
-
-  const fetchScenarios = async () => {
-    try {
-      const response = await fetch(`http://localhost:3002/api/scenarios?url=${url}`);
-      const data = await response.json();
-      setScenarios(data);
-    } catch (error) {
-      console.error('Failed to fetch scenarios:', error);
-    }
-  };
+  }, [url]);
 
   const runTests = async () => {
     try {
+      setLoading(true);
+      setError(null);
+      setResults(null);
+
       const response = await fetch('http://localhost:3002/api/run-tests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -51,10 +64,18 @@ const TestExecution = () => {
           headed,
         }),
       });
+
+      if (!response.ok) {
+        throw new Error('Failed to run tests');
+      }
+
       const data = await response.json();
       setResults(data);
     } catch (error) {
       console.error('Failed to run tests:', error);
+      setError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -70,6 +91,7 @@ const TestExecution = () => {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             fullWidth
+            placeholder="https://www.example.com"
           />
         </Box>
         <FormControlLabel
@@ -104,11 +126,23 @@ const TestExecution = () => {
           variant="contained"
           startIcon={<PlayArrow />}
           onClick={runTests}
-          disabled={!url || selectedScenarios.length === 0}
+          disabled={!url || selectedScenarios.length === 0 || loading}
         >
-          Run Tests
+          {loading ? 'Running Tests...' : 'Run Tests'}
         </Button>
       </Paper>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          {error}
+        </Alert>
+      )}
+
+      {loading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', my: 3 }}>
+          <CircularProgress />
+        </Box>
+      )}
 
       {results && (
         <Paper sx={{ p: 3 }}>
@@ -116,17 +150,36 @@ const TestExecution = () => {
             Test Results
           </Typography>
           {results.results.map((result, index) => (
-            <Box key={index} sx={{ mb: 2 }}>
-              <Typography variant="subtitle1">{result.scenario}</Typography>
-              {result.steps.map((step, stepIndex) => (
-                <Alert
-                  key={stepIndex}
-                  severity={step.status === 'passed' ? 'success' : 'error'}
-                  sx={{ mt: 1 }}
-                >
-                  {step.testName}: {step.status}
-                </Alert>
-              ))}
+            <Box key={index} sx={{ mb: 3 }}>
+              <Typography variant="subtitle1" gutterBottom>
+                Scenario: {result.scenario}
+              </Typography>
+              <List>
+                {result.steps.map((step, stepIndex) => (
+                  <React.Fragment key={stepIndex}>
+                    <ListItem>
+                      <ListItemIcon>
+                        {step.status === 'passed' ? (
+                          <CheckCircle color="success" />
+                        ) : (
+                          <Error color="error" />
+                        )}
+                      </ListItemIcon>
+                      <MuiListItemText
+                        primary={step.testName}
+                        secondary={
+                          step.error ? (
+                            <Typography color="error">{step.error}</Typography>
+                          ) : (
+                            `Duration: ${step.duration}ms`
+                          )
+                        }
+                      />
+                    </ListItem>
+                    {stepIndex < result.steps.length - 1 && <Divider />}
+                  </React.Fragment>
+                ))}
+              </List>
             </Box>
           ))}
         </Paper>

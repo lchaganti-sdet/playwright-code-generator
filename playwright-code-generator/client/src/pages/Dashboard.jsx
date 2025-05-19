@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Grid, Paper, Typography } from '@mui/material';
+import { Box, Grid, Paper, Typography, Button } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import { Code, PlayArrow, Assessment, VideoLibrary } from '@mui/icons-material';
 
@@ -34,9 +34,12 @@ const Dashboard = () => {
   ];
 
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ flexGrow: 1 }}>
       <Typography variant="h4" gutterBottom>
         Welcome to Playwright Code Generator
+      </Typography>
+      <Typography variant="body1" paragraph>
+        Create, record, and execute automated tests with ease. Choose a feature below to get started.
       </Typography>
       <Grid container spacing={3}>
         {features.map((feature) => (
@@ -49,18 +52,20 @@ const Dashboard = () => {
                 flexDirection: 'column',
                 alignItems: 'center',
                 textAlign: 'center',
-                cursor: 'pointer',
                 '&:hover': {
-                  backgroundColor: 'action.hover'
+                  boxShadow: 6,
+                  cursor: 'pointer'
                 }
               }}
               onClick={() => navigate(feature.path)}
             >
-              {feature.icon}
-              <Typography variant="h6" sx={{ mt: 2 }}>
+              <Box sx={{ color: 'primary.main', mb: 2 }}>
+                {feature.icon}
+              </Box>
+              <Typography variant="h6" gutterBottom>
                 {feature.title}
               </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
                 {feature.description}
               </Typography>
             </Paper>
